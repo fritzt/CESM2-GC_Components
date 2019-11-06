@@ -154,6 +154,7 @@
       <value compset="_CAM%DABIP04">-phys adiabatic</value>
       <value compset="_CAM%TJ16">-phys tj2016 -analytic_ic</value>
       <value compset="_CAM%HS94">-phys held_suarez</value>
+      <value compset="_CAM%GC">-chem geoschem</value>
       <value compset="_CAM%KESSLER">-phys kessler -chem terminator -analytic_ic</value>
 
       <!-- Aquaplanet -->
