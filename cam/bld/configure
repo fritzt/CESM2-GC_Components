@@ -1417,7 +1417,7 @@ if ($chem_pkg =~ '_mam3') {
 
 # TMMF - wedge in GEOS-Chem CPP definitions here
 if ($chem_pkg =~ 'geoschem') {
-    $chem_cppdefs .= ' -DEXTERNAL_GRID -DEXTERNAL_FORCING -DGC_CESM -DUCX -DMERRA2 -DLINUX_IFORT -DUSE_REAL8 ';
+    $chem_cppdefs .= ' -DEXTERNAL_GRID -DEXTERNAL_FORCING -DUCX -DMERRA2 -DLINUX_IFORT -DUSE_REAL8 -DMODEL_CESM';
     # TMMF - Temporary fix
     $chem_nadv = 200;
 }
