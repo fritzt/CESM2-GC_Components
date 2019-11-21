@@ -34,6 +34,8 @@ module chemistry
   !-----------------------------------------------------------------
   USE PRECISION_MOD,       ONLY : fp, f4     ! Flexible precision
 
+  use Chem_Mods,           only : NSlvd, Slvd_Lst, Slvd_Ref_MMR
+
   ! Exit routine in CAM
   use cam_abortutils,      only : endrun
 
@@ -132,14 +134,16 @@ contains
 
   subroutine chem_register
 
-    use physics_buffer, only : pbuf_add_field, dtype_r8
-    use PhysConst,      only : MWDry
+    use physics_buffer,      only : pbuf_add_field, dtype_r8
+    use PhysConst,           only : MWDry
 
-    use State_Grid_Mod, only : Init_State_Grid, Cleanup_State_Grid
-    use State_Chm_Mod,  only : Init_State_Chm, Cleanup_State_Chm
-    use State_Chm_Mod,  only : Ind_
-    use Input_Opt_Mod,  only : Set_Input_Opt,  Cleanup_Input_Opt
-    use Species_Mod,    only : Species
+    use Short_Lived_Species, only : Register_Short_Lived_Species
+
+    use State_Grid_Mod,      only : Init_State_Grid, Cleanup_State_Grid
+    use State_Chm_Mod,       only : Init_State_Chm, Cleanup_State_Chm
+    use State_Chm_Mod,       only : Ind_
+    use Input_Opt_Mod,       only : Set_Input_Opt,  Cleanup_Input_Opt
+    use Species_Mod,         only : Species
 
     !-----------------------------------------------------------------------
     !
@@ -294,6 +298,7 @@ contains
        ThisSpc => NULL()
     ENDDO
 
+    ! Now unadvected species
     Map2GC_Sls = 0
     Sls_Ref_MMR(:) = 0.0e+0_r8
     SlsMWRatio(:)  = -1.0e+0_r8
@@ -313,20 +318,11 @@ contains
         ENDIF
     ENDDO
 
-    ! MOZART uses this for short-lived species. Not certain exactly what it
-    ! does, but note that the "ShortLivedSpecies" physics buffer already
-    ! needs to have been initialized, which we haven't done. Physics buffers
-    ! are fields which are available either across timesteps or for use to
-    ! modules outside of chemistry
+    ! Pass information to "short_lived_species" module
+    Slvd_Ref_MMR(1:NSls) = Sls_Ref_MMR(1:NSls)
+    CALL Register_Short_Lived_Species()
     ! More information:
     ! http://www.cesm.ucar.edu/models/atm-cam/docs/phys-interface/node5.html
-    !call pbuf_add_field('ShortLivedSpecies','global',dtype_r8,(/PCOLS,PVER,NSlvd/),pbf_idx)
-    ! returned values
-    !  n : mapping in CAM
-    ! map2chm is a mozart variable
-    !map2chm(n) = i
-    !indices(i) = 0
-    ! ===== SDE DEBUG =====
 
     ! Clean up
     Call Cleanup_State_Chm ( .False., SC, RC )
@@ -426,6 +422,16 @@ contains
     CALL MPIBCAST(NSls,        1,                               MPIINT,  0, MPICOM )
     CALL MPIBCAST(SlsNames,    LEN(SlsNames(1))*NSlsMax,        MPICHAR, 0, MPICOM )
 #endif
+
+    ! Update "short_lived_species" arrays - will eventually unify these
+    NSlvd = NSls
+    ALLOCATE(Slvd_Lst(NSlvd), STAT=IERR)
+    IF ( IERR .NE. 0 ) CALL ENDRUN('Failure while allocating Slvd_Lst')
+    ALLOCATE(Slvd_Ref_MMR(NSlvd), STAT=IERR)
+    IF ( IERR .NE. 0 ) CALL ENDRUN('Failure while allocating Slvd_Ref_MMR')
+    DO I=1,NSls
+        Slvd_Lst(I) = TRIM(SlsNames(I))
+    ENDDO
 
   end subroutine chem_readnl
 
@@ -557,6 +563,8 @@ contains
     REAL(r8), ALLOCATABLE :: Col_Area(:)
     REAL(fp), ALLOCATABLE :: Ap_CAM_Flip(:), Bp_CAM_Flip(:)
 
+    REAL(r8), POINTER     :: SlsPtr(:,:,:)
+
     ! Assume a successful return until otherwise
     RC                      = GC_SUCCESS
 
@@ -578,6 +586,18 @@ contains
     NX = 1
     NY = MAXVAL(NCOL)
     NZ = NLEV
+
+    !! Add short lived speies to buffers
+    !CALL Pbuf_add_field(Trim(SLSBuffer),'global',dtype_r8,(/PCOLS,PVER,NSls/),Sls_Pbf_Idx)
+    !! Initialize
+    !ALLOCATE(SlsPtr(PCOLS,PVER,BEGCHUNK:ENDCHUNK), STAT=IERR)
+    !IF ( IERR .NE. 0 ) CALL ENDRUN('Failure while allocating SlsPtr')
+    !SlsPtr(:,:,:) = 0.0e+0_r8
+    !DO I=1,NSls
+    !   SlsPtr(:,:,:) = Sls_Ref_MMR(I)
+    !   CALL pbuf_set_field(pbuf2d,Sls_Pbf_Idx,SlsPtr,start=(/1,1,i/),kount=(/PCOLS,PVER,1/))
+    !ENDDO
+    !DEALLOCATE(SlsPtr) 
 
     ! This ensures that each process allocates everything needed for its chunks
     ALLOCATE(State_Chm(BEGCHUNK:ENDCHUNK) , STAT=IERR)
@@ -1328,39 +1348,42 @@ contains
 
   subroutine chem_timestep_tend( State, ptend, cam_in, cam_out, dT, pbuf,  fh2o )
 
-    use physics_buffer,   only: physics_buffer_desc, pbuf_get_field
-    use cam_history,      only: outfld
-    use camsrfexch,       only: cam_in_t, cam_out_t
+    use physics_buffer,      only: physics_buffer_desc, pbuf_get_field
+    use cam_history,         only: outfld
+    use camsrfexch,          only: cam_in_t, cam_out_t
 
-    use phys_grid,        only: get_ncols_p, get_rlat_all_p, get_rlon_all_p
+    use phys_grid,           only: get_ncols_p, get_rlat_all_p, get_rlon_all_p
 
-    use Dao_Mod,          only: Set_Dry_Surface_Pressure
-    use Dao_Mod,          only: AirQnt
-    use GC_Grid_Mod,      only: SetGridFromCtr
-    use Pressure_Mod,     only: Set_Floating_Pressures
-    use Pressure_Mod,     only: Accept_External_Pedge
-    use Time_Mod,         only: Accept_External_Date_Time
-    use Strat_chem_Mod,   only: Init_Strat_Chem
-    use Toms_Mod,         only: Compute_Overhead_O3
-    use Chemistry_Mod,    only: Do_Chemistry
-    use Wetscav_Mod,      only: Setup_Wetscav
-    use CMN_Size_Mod,     only: PTop
+    use Dao_Mod,             only: Set_Dry_Surface_Pressure
+    use Dao_Mod,             only: AirQnt
+    use GC_Grid_Mod,         only: SetGridFromCtr
+    use Pressure_Mod,        only: Set_Floating_Pressures
+    use Pressure_Mod,        only: Accept_External_Pedge
+    use Time_Mod,            only: Accept_External_Date_Time
+    use Strat_chem_Mod,      only: Init_Strat_Chem
+    use Toms_Mod,            only: Compute_Overhead_O3
+    use Chemistry_Mod,       only: Do_Chemistry
+    use Wetscav_Mod,         only: Setup_Wetscav
+    use CMN_Size_Mod,        only: PTop
 
     ! For calculating SZA
-    use Orbit,            only: zenith
-    use Time_Manager,     only: Get_Curr_Calday
+    use Orbit,               only: zenith
+    use Time_Manager,        only: Get_Curr_Calday
 
     ! Calculating relative humidity
-    use WV_Saturation,    only: QSat
-    use PhysConst,        only: MWDry
+    use WV_Saturation,       only: QSat
+    use PhysConst,           only: MWDry
 
     ! Grid area
-    use PhysConst,        only: Gravit
-    use PhysConstants,    only: Re
-    use Phys_Grid,        only: get_area_all_p
+    use PhysConst,           only: Gravit
+    use PhysConstants,       only: Re
+    use Phys_Grid,           only: get_area_all_p
+
+    use Short_Lived_Species, only : Get_Short_Lived_Species
+    use Short_Lived_Species, only : Set_Short_Lived_Species
 
     ! Use GEOS-Chem versions of physical constants
-    use PhysConstants,    only: PI, PI_180
+    use PhysConstants,       only: PI, PI_180
 
     REAL(r8),            INTENT(IN)    :: dT          ! Time step
     TYPE(physics_state), INTENT(IN)    :: State       ! Physics State variables
@@ -1412,6 +1435,9 @@ contains
     CHARACTER(LEN=255) :: SpcName
     REAL(r8)           :: VMR(State%NCOL,PVER)
     REAL(r8)           :: MMR0, MMR1, Mass0, Mass1, AirMass, Mass10r, Mass10a
+    REAL(r8)           :: MMR_Min, MMR_Max
+
+    REAL(r8)           :: SlsData(State%NCOL, PVER, NSls)
 
     LOGICAL       :: rootChunk
     INTEGER       :: RC
@@ -1499,14 +1525,23 @@ contains
         ENDIF
     ENDDO
 
-    ! TEMPORARY: initalize all unadvected species to background values
+    ! Retrieve previous value of species data
+    SlsData(:,:,:) = 0.0e+0_r8
+    CALL Get_Short_Lived_Species( SlsData, LCHNK, NCOL, Pbuf )
+
+    ! Remap and flip them
     DO N = 1, NSls
         M = Map2GC_Sls(N)
         IF (M > 0) THEN
-            State_Chm(LCHNK)%Species(:,:,:,M) = REAL(Sls_Ref_MMR(N),fp)
+            DO J = 1, NCOL
+                DO K = 1, PVER
+                    State_Chm(LCHNK)%Species(1,J,K,M) = REAL(SlsData(J,PVER+1-K,N),fp)
+                ENDDO
+            ENDDO
         ENDIF
     ENDDO
 
+    ! Initialize tendency array
     CALL Physics_ptend_init(ptend, State%psetcols, 'chemistry', lq=lq)
 
     ! Calculate COS(SZA)
@@ -1781,6 +1816,23 @@ contains
     ! yet)
     State_Chm(LCHNK)%Species(1,:,:,iH2O) = MMR_Beg(:,:,iH2O)
 
+    ! Store unadvected species data
+    SlsData = 0.0e+0_r8
+    DO N = 1, NSls
+        M = MAP2GC_Sls(N)
+        IF ( M > 0 ) THEN
+            Mass1   = 0.0e+0_r8
+            MMR_Min = 1.0e+9_r8
+            MMR_Max = 0.0e+0_r8
+            DO J = 1, NCOL
+                DO K = 1, PVER
+                    SlsData(J,PVER+1-K,N) = REAL(State_Chm(LCHNK)%Species(1,J,K,M),r8)
+                ENDDO
+            ENDDO
+        ENDIF
+    ENDDO
+    CALL Set_Short_Lived_Species( SlsData, LCHNK, NCOL, Pbuf )
+
     ! Write diagnostic output
     DO N=1, pcnst
         M = Map2GC(N)
@@ -1990,7 +2042,8 @@ contains
     IF (ALLOCATED(State_Grid))    DEALLOCATE(State_Grid)
     IF (ALLOCATED(State_Met))     DEALLOCATE(State_Met)
 
-    IF (MasterProc) WRITE(iulog,'(a,4(x,L1))') ' --> DEALLOC CHECK : ', ALLOCATED(State_Chm), ALLOCATED(State_Diag), ALLOCATED(State_Grid), ALLOCATED(State_Met)
+    IF (ALLOCATED(Slvd_Lst    ))  DEALLOCATE(Slvd_Lst)
+    IF (ALLOCATED(Slvd_Ref_MMR))  DEALLOCATE(Slvd_Ref_MMR)
 
     RETURN
 
